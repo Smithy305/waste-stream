@@ -1,0 +1,56 @@
+# Base configuration — shared defaults for all experiments.
+
+seed: 42
+
+# Paths
+data_dir: data/zerowaste
+output_dir: results
+
+# Dataset
+dataset:
+  num_classes: 4
+  class_names:
+    - rigid_plastic
+    - cardboard
+    - metal
+    - soft_plastic
+
+# Model
+model:
+  backbone: yolov8s    # yolov8n, yolov8s, yolov8m, yolov8l
+  pretrained: true
+  img_size: 640
+
+# Training
+training:
+  epochs: 100
+  batch_size: 16
+  lr: 0.01
+  optimizer: SGD
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  patience: 20          # early stopping patience (epochs)
+  num_workers: 4
+  device: ""            # empty string = auto-detect
+
+# Augmentation
+augmentation:
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  flip_lr: 0.5
+  flip_ud: 0.0
+  mosaic: 1.0
+  mixup: 0.0
+  scale: 0.5
+
+# Logging
+wandb:
+  enabled: false
+  run_name: null
+  tags: []
+
+tensorboard:
+  enabled: true
+  log_dir: ${output_dir}/tensorboard

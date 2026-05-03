@@ -1,0 +1,11 @@
+# Supervised baseline — train on labelled data only.
+base: base.yaml
+
+experiment_name: supervised_baseline
+
+# Fraction of training set to use as labelled data (1.0 = all labels).
+labelled_fraction: 1.0
+
+training:
+  epochs: 100
+  loss_fn: cross_entropy

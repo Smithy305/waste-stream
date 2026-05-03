@@ -1,0 +1,19 @@
+# Semi-supervised teacher-student training with pseudo-labels.
+base: base.yaml
+
+experiment_name: semi_supervised
+
+labelled_fraction: 0.1
+
+# Teacher-student settings
+semi_supervised:
+  enabled: true
+  pl_threshold: 0.7             # pseudo-label confidence threshold
+  ema_decay: 0.999              # teacher EMA decay rate
+  teacher_warmup_epochs: 10     # supervised-only warmup before pseudo-labelling
+  unsup_loss_weight: 1.0        # weight for pseudo-label loss relative to supervised loss
+  class_specific_threshold: false
+
+training:
+  epochs: 150
+  loss_fn: cross_entropy

@@ -1,3 +1,13 @@
+# Project-specific
+data/zerowaste/
+data/splits/
+results/*/
+!results/.gitkeep
+wandb/
+*.pt
+*.pth
+*.onnx
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
