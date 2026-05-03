@@ -35,7 +35,7 @@ We evaluate cross-scene generalisation and robustness to deployment-time visual 
 ```bash
 # Clone
 git clone https://github.com/Smithy305/waste-stream.git
-cd zerowaste-semi-supervised
+cd waste-stream
 
 # Install dependencies
 pip install -r requirements.txt
