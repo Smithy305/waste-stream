@@ -34,7 +34,7 @@ We evaluate cross-scene generalisation and robustness to deployment-time visual 
 
 ```bash
 # Clone
-git clone [https://github.com/Smithy305/zerowaste-semi-supervised.git](https://github.com/Smithy305/waste-stream.git)
+git clone https://github.com/Smithy305/waste-stream.git
 cd zerowaste-semi-supervised
 
 # Install dependencies
