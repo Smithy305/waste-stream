@@ -85,18 +85,32 @@ class SemiSupervisedTrainer:
             COCO-format dict containing only pseudo-labelled images and annotations.
         """
         data_dir = Path(self.cfg.data_dir) / "train" / "data"
-        threshold = self.ss_cfg.pl_threshold
 
         img_lookup = {img["id"]: img for img in coco_data["images"]}
         cat_ids = sorted(cat["id"] for cat in coco_data["categories"])
 
-        pseudo_images = []
-        pseudo_annotations = []
-        ann_id = 0
+        # Resolve per-class thresholds. Falls back to global pl_threshold for
+        # any category not explicitly listed in cfg.semi_supervised.class_thresholds.
+        global_threshold = float(self.ss_cfg.pl_threshold)
+        class_thresholds_cfg = self.ss_cfg.get("class_thresholds", None)
+        class_thresholds = {cat_id: global_threshold for cat_id in cat_ids}
+        if class_thresholds_cfg is not None:
+            for cat_id_str, val in dict(class_thresholds_cfg).items():
+                class_thresholds[int(cat_id_str)] = float(val)
+        # Lowest threshold drives the predict() call so we get all candidates
+        min_threshold = min(class_thresholds.values())
 
-        stats = {"total_preds": 0, "kept": 0, "mean_conf": 0.0, "class_counts": {}}
+        # Resolve per-class caps. Same fallback semantics as thresholds.
+        global_cap = self.ss_cfg.get("max_pseudo_per_class", None)
+        per_class_caps_cfg = self.ss_cfg.get("max_pseudo_per_class_dict", None)
+        class_caps: dict[int, int | None] = {cat_id: global_cap for cat_id in cat_ids}
+        if per_class_caps_cfg is not None:
+            for cat_id_str, val in dict(per_class_caps_cfg).items():
+                class_caps[int(cat_id_str)] = int(val)
 
-        teacher_model = teacher.get_model()
+        # Collect candidates per (img_id, class), then post-process for caps.
+        # Each candidate: (img_id, img_info, cat_id, bbox, confidence)
+        candidates: list[tuple[int, dict, int, list[float], float]] = []
 
         for img_id in unlabelled_ids:
             if img_id not in img_lookup:
@@ -107,56 +121,79 @@ class SemiSupervisedTrainer:
             if not img_path.exists():
                 continue
 
-            # Run teacher inference
+            # Run teacher inference at the lowest per-class threshold so we
+            # don't pre-filter minority classes.
             results = self.student.predict(
                 source=str(img_path),
-                conf=threshold,
+                conf=min_threshold,
             )
 
             if not results or len(results[0].boxes) == 0:
                 continue
 
             boxes = results[0].boxes
-            pseudo_images.append(img_info)
-
             for i in range(len(boxes)):
                 conf = float(boxes.conf[i])
                 cls = int(boxes.cls[i])
                 xyxy = boxes.xyxy[i].cpu().numpy()
 
-                # Convert xyxy to COCO bbox format [x, y, w, h]
-                x1, y1, x2, y2 = xyxy
-                bbox = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
-
                 # Map YOLO class index back to category ID
                 cat_id = cat_ids[cls] if cls < len(cat_ids) else cat_ids[0]
 
-                pseudo_annotations.append({
-                    "id": ann_id,
-                    "image_id": img_id,
-                    "category_id": cat_id,
-                    "bbox": bbox,
-                    "area": bbox[2] * bbox[3],
-                    "iscrowd": 0,
-                    "confidence": conf,
-                })
-                ann_id += 1
+                # Apply per-class threshold
+                if conf < class_thresholds[cat_id]:
+                    continue
 
-                stats["total_preds"] += 1
-                stats["kept"] += 1
-                stats["mean_conf"] += conf
-                cls_name = str(cat_id)
-                stats["class_counts"][cls_name] = stats["class_counts"].get(cls_name, 0) + 1
+                x1, y1, x2, y2 = xyxy
+                bbox = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
+                candidates.append((img_id, img_info, cat_id, bbox, conf))
 
-        if stats["kept"] > 0:
-            stats["mean_conf"] /= stats["kept"]
+        # Apply per-class caps: keep top-N highest-confidence detections per class.
+        kept_by_class: dict[int, list[tuple[int, dict, int, list[float], float]]] = {}
+        for cand in candidates:
+            kept_by_class.setdefault(cand[2], []).append(cand)
+
+        kept: list[tuple[int, dict, int, list[float], float]] = []
+        for cat_id, group in kept_by_class.items():
+            group.sort(key=lambda c: c[4], reverse=True)
+            cap = class_caps.get(cat_id)
+            if cap is not None and cap > 0:
+                group = group[:cap]
+            kept.extend(group)
+
+        # Build COCO output
+        pseudo_images_set: dict[int, dict] = {}
+        pseudo_annotations: list[dict] = []
+        ann_id = 0
+        class_counts: dict[str, int] = {}
+        total_conf = 0.0
+
+        for img_id, img_info, cat_id, bbox, conf in kept:
+            pseudo_images_set[img_id] = img_info
+            pseudo_annotations.append({
+                "id": ann_id,
+                "image_id": img_id,
+                "category_id": cat_id,
+                "bbox": bbox,
+                "area": bbox[2] * bbox[3],
+                "iscrowd": 0,
+                "confidence": conf,
+            })
+            ann_id += 1
+            class_counts[str(cat_id)] = class_counts.get(str(cat_id), 0) + 1
+            total_conf += conf
+
+        pseudo_images = list(pseudo_images_set.values())
+        mean_conf = total_conf / len(kept) if kept else 0.0
 
         logger.info(
-            "Pseudo-labels: %d images, %d boxes (mean conf=%.3f)",
-            len(pseudo_images), stats["kept"], stats["mean_conf"],
+            "Pseudo-labels: %d candidates → %d kept after caps (%d images, mean conf=%.3f)",
+            len(candidates), len(kept), len(pseudo_images), mean_conf,
         )
-        for cls_name, count in sorted(stats["class_counts"].items()):
-            logger.info("  Class %s: %d pseudo-labels", cls_name, count)
+        for cls_name, count in sorted(class_counts.items()):
+            cap = class_caps.get(int(cls_name))
+            cap_str = f" (cap={cap})" if cap else ""
+            logger.info("  Class %s: %d pseudo-labels%s", cls_name, count, cap_str)
 
         return {
             "images": pseudo_images,
@@ -194,6 +231,11 @@ class SemiSupervisedTrainer:
             name="warmup",
         )
 
+        # Track the latest best checkpoint so each round can reload cleanly
+        # (Ultralytics doesn't support calling .train() twice on the same YOLO instance).
+        latest_ckpt = self._find_best_checkpoint(work_dir, "warmup")
+        self.student.load_checkpoint(latest_ckpt)
+
         # --- Phase 2: Initialise EMA teacher ---
         logger.info("Phase 2: Initialising EMA teacher (decay=%.6f)", self.ss_cfg.ema_decay)
         teacher = EMATeacher(self.student.model.model, decay=self.ss_cfg.ema_decay)
@@ -223,13 +265,19 @@ class SemiSupervisedTrainer:
                 merged_coco, coco_data, data_dir, work_dir, f"round{round_idx}"
             )
 
-            # Train student
-            results = self.student.train_model(
+            # Train student with retry on the known MPS task-aligned-assigner crash.
+            # That bug is non-deterministic — reloading from the same checkpoint and
+            # retrying with a smaller batch size almost always gets past it.
+            results = self._train_round_with_retry(
                 data_yaml=data_yaml,
                 epochs=epochs_per_round,
-                project=str(work_dir),
-                name=f"round{round_idx}",
+                work_dir=work_dir,
+                run_name=f"round{round_idx}",
+                source_ckpt=latest_ckpt,
             )
+
+            # Update latest checkpoint pointer for the next round
+            latest_ckpt = self._find_best_checkpoint(work_dir, f"round{round_idx}")
 
             # Update teacher EMA
             teacher.update(self.student.model.model)
@@ -241,6 +289,80 @@ class SemiSupervisedTrainer:
 
         logger.info("Semi-supervised training complete.")
         return results
+
+    def _find_best_checkpoint(self, work_dir: Path, run_name: str) -> Path:
+        """Locate the best.pt written by Ultralytics for a given run.
+
+        Ultralytics may write to either ``<work_dir>/<run_name>/weights/best.pt``
+        or ``runs/detect/<work_dir>/<run_name>/weights/best.pt`` depending on version
+        and project path resolution. Search both.
+        """
+        candidates = [
+            work_dir / run_name / "weights" / "best.pt",
+            Path("runs/detect") / work_dir / run_name / "weights" / "best.pt",
+        ]
+        for ckpt in candidates:
+            if ckpt.exists():
+                return ckpt
+
+        # Fall back to a glob search for any best.pt under work_dir or runs/detect
+        for root in [work_dir, Path("runs/detect")]:
+            matches = sorted(root.rglob(f"{run_name}/weights/best.pt"))
+            if matches:
+                return matches[-1]
+
+        raise FileNotFoundError(
+            f"Could not find best.pt for run '{run_name}' under {work_dir} or runs/detect/"
+        )
+
+    def _train_round_with_retry(
+        self,
+        data_yaml: Path,
+        epochs: int,
+        work_dir: Path,
+        run_name: str,
+        source_ckpt: Path,
+        max_retries: int = 2,
+    ) -> Any:
+        """Run a training round with retry on the MPS shape-mismatch crash.
+
+        The Ultralytics task-aligned assigner occasionally crashes on MPS with
+        a non-deterministic shape mismatch error. Retrying from the same
+        checkpoint with a halved batch size usually succeeds.
+        """
+        original_batch = self.cfg.training.batch_size
+        attempt = 0
+
+        while True:
+            # Always reload from the source checkpoint — Ultralytics doesn't allow
+            # calling .train() twice on the same YOLO instance.
+            self.student.load_checkpoint(source_ckpt)
+
+            try:
+                batch_override = max(2, original_batch // (2 ** attempt))
+                if attempt > 0:
+                    logger.warning(
+                        "Retry %d/%d for %s — reducing batch size to %d",
+                        attempt, max_retries, run_name, batch_override,
+                    )
+                return self.student.train_model(
+                    data_yaml=data_yaml,
+                    epochs=epochs,
+                    batch_size=batch_override,
+                    project=str(work_dir),
+                    name=f"{run_name}_retry{attempt}" if attempt > 0 else run_name,
+                )
+            except RuntimeError as e:
+                msg = str(e)
+                # Recognise the MPS assigner shape mismatch specifically.
+                is_mps_assigner_bug = (
+                    "shape mismatch" in msg
+                    and "broadcast to indexing result" in msg
+                )
+                if not is_mps_assigner_bug or attempt >= max_retries:
+                    raise
+                logger.warning("Caught MPS assigner crash on %s: %s", run_name, msg)
+                attempt += 1
 
     def _filter_coco(self, coco_data: dict[str, Any], image_ids: list[int]) -> dict[str, Any]:
         """Filter COCO data to a subset of image IDs."""

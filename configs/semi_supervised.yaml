@@ -8,11 +8,28 @@ labelled_fraction: 0.1
 # Teacher-student settings
 semi_supervised:
   enabled: true
-  pl_threshold: 0.7             # pseudo-label confidence threshold
+  pl_threshold: 0.7             # default pseudo-label confidence threshold
   ema_decay: 0.999              # teacher EMA decay rate
   teacher_warmup_epochs: 10     # supervised-only warmup before pseudo-labelling
   unsup_loss_weight: 1.0        # weight for pseudo-label loss relative to supervised loss
-  class_specific_threshold: false
+
+  # Per-class confidence thresholds — lower values let weaker predictions through
+  # for minority classes. Keys are COCO category IDs.
+  class_thresholds:
+    1: 0.7    # rigid_plastic
+    2: 0.85   # cardboard — demand higher confidence
+    3: 0.5    # metal — let through weaker predictions
+    4: 0.7    # soft_plastic
+
+  # Per-class caps on pseudo-labels per round. Prevents a dominant class
+  # from drowning out the labelled signal in the merged training set.
+  # Set to null to use the global max_pseudo_per_class value below.
+  max_pseudo_per_class: 1500
+  max_pseudo_per_class_dict:
+    1: 500    # rigid_plastic
+    2: 1500   # cardboard — capped; without this, ~2500-5000 per round
+    3: 200    # metal
+    4: 1000   # soft_plastic
 
 training:
   epochs: 150

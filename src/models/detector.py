@@ -78,9 +78,11 @@ class Detector(nn.Module):
             workers=train_cfg.num_workers,
             project=project or self.cfg.output_dir,
             name=name or self.cfg.get("experiment_name", "train"),
-            device=train_cfg.device or None,
+            device=train_cfg.device if train_cfg.device else None,
             resume=resume,
             verbose=True,
+            conf=0.25,
+            max_det=100,
             **kwargs,
         )
 
